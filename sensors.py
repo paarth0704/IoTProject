@@ -2,10 +2,17 @@
 import paho.mqtt.client  as mqtt
 import paho.mqtt.publish as publish
 import time,json,ssl
+import smbus
+import time from ctypes
+import c_short
+
+
 #import wiringpi2 as wpi
 #from tentacle_pi.TSL2561 import TSL2561
 #import nfc
 import sys, thread
+
+
 
 def on_connect(mqttc, obj, flags, rc):
     if rc == 0:
@@ -69,20 +76,127 @@ def reader():
 #mlux = mpir = mmat = msound = mvolume = 0
 
 
+DEVICE = 0x77 # Default device I2C address
+  
+#bus = smbus.SMBus(0)  # Rev 1 Pi uses 0
+bus = smbus.SMBus(1) # Rev 2 Pi uses 1
+  
+def convertToString(data):
+  # Simple function to convert binary data into
+  # a string
+  return str((data[1] + (256 * data[0])) / 1.2)
+ 
+def getShort(data, index):
+  # return two bytes from data as a signed 16-bit value
+  return c_short((data[index]<< 8) + data[index + 1]).value
+ 
+def getUshort(data, index):
+  # return two bytes from data as an unsigned 16-bit value
+  return (data[index]<< 8) + data[index+1]
+ 
+def readBmp180Id(addr=DEVICE):
+  # Register Address
+  REG_ID     = 0xD0
+ 
+  (chip_id, chip_version) = bus.read_i2c_block_data(addr, REG_ID, 2)
+  return (chip_id, chip_version)
+   
+def readBmp180(addr=DEVICE):
+  # Register Addresses
+  REG_CALIB  = 0xAA
+  REG_MEAS   = 0xF4
+  REG_MSB    = 0xF6
+  REG_LSB    = 0xF7
+  # Control Register Address
+  CRV_TEMP   = 0x2E
+  CRV_PRES   = 0x34
+  # Oversample setting
+  OVERSAMPLE = 3    # 0 - 3
+   
+  # Read calibration data
+  # Read calibration data from EEPROM
+  cal = bus.read_i2c_block_data(addr, REG_CALIB, 22)
+ 
+  # Convert byte data to word values
+  AC1 = getShort(cal, 0)
+  AC2 = getShort(cal, 2)
+  AC3 = getShort(cal, 4)
+  AC4 = getUshort(cal, 6)
+  AC5 = getUshort(cal, 8)
+  AC6 = getUshort(cal, 10)
+  B1  = getShort(cal, 12)
+  B2  = getShort(cal, 14)
+  MB  = getShort(cal, 16)
+  MC  = getShort(cal, 18)
+  MD  = getShort(cal, 20)
+ 
+  # Read temperature
+  bus.write_byte_data(addr, REG_MEAS, CRV_TEMP)
+  time.sleep(0.005)
+  (msb, lsb) = bus.read_i2c_block_data(addr, REG_MSB, 2)
+  UT = (msb << 8) + lsb
+ 
+  # Read pressure
+  bus.write_byte_data(addr, REG_MEAS, CRV_PRES + (OVERSAMPLE << 6))
+  time.sleep(0.04)
+  (msb, lsb, xsb) = bus.read_i2c_block_data(addr, REG_MSB, 3)
+  UP = ((msb << 16) + (lsb << 8) + xsb) >> (8 - OVERSAMPLE)
+ 
+  # Refine temperature
+  X1 = ((UT - AC6) * AC5) >> 15
+  X2 = (MC << 11) / (X1 + MD)
+  B5 = X1 + X2 temperature = (B5 + 8) >> 4
+ 
+  # Refine pressure
+  B6  = B5 - 4000
+  B62 = B6 * B6 >> 12
+  X1  = (B2 * B62) >> 11
+  X2  = AC2 * B6 >> 11
+  X3  = X1 + X2
+  B3  = (((AC1 * 4 + X3) << OVERSAMPLE) + 2) >> 2
+ 
+  X1 = AC3 * B6 >> 13
+  X2 = (B1 * B62) >> 16
+  X3 = ((X1 + X2) + 2) >> 2
+  B4 = (AC4 * (X3 + 32768)) >> 15
+  B7 = (UP - B3) * (50000 >> OVERSAMPLE)
+ 
+  P = (B7 * 2) / B4
+ 
+  X1 = (P >> 8) * (P >> 8)
+  X1 = (X1 * 3038) >> 16
+  X2 = (-7357 * P) >> 16
+  pressure = P + ((X1 + X2 + 3791) >> 4)
+ 
+  return (temperature/10.0,pressure/ 100.0)
+ 
+def main():
+  print
+   
+  (temperature,pressure)=readBmp180()
+  print "Temperature : ", temperature, "C"
+  print "Pressure    : ", pressure, "mbar"
+   
+if __name__=="__main__":
+   main()
+
+
+
+
 def func(name, delay):
     var = 1
     while True:
         time.sleep(3)
         ts = int(time.time())
-        mlux = var
+        mpress = pressure
         mpir = var
         mmat = var
-        msound = var
+        mtemp = temperature
         mvolume = var
         mom = var
         dad = var + 1
         var = var + 1
-        msg = {'ts': ts, 'lux': mlux, 'pir': mpir, 'mat': mmat, 'sound': msound, 'volume': mvolume, 'mom': mom, 'dad': dad}
+        msg = {'timestamp': ts, 'pressure': mpress, 'pir': mpir, 'mat': mmat, 'temperature': mtemp, 'volume': mvolume, 'mom': mom, 'dad': dad}
         print name
         print json.dumps(msg)
         client.publish('sensorTopic', json.dumps(msg))
@@ -97,110 +211,3 @@ except:
 while 1:
     pass
 
-
-
-# var = 1
-
-# while True:
-#     print "Thread1"
-    # time.sleep(3)
-   # read sensor data
-    # ts = int(time.time())
-   #lux = tsl.lux()
-   #pir = wpi.digitalRead(2)
-   #mat = wpi.digitalRead(3)
-   #sound = wpi.digitalRead(21)
-   #volume = wpi.analogRead(0)*255/2047 # 0-10=quiet, 10-30=moderate, 30-127=loud
-
-
-    #mom = 0
-    #dad = 0
-    #if mat == 0:
-    #    if nfcid == 'F10B330F':
-    #        mom = 1
-    #    elif nfcid == '833BC4A2':
-    #       dad = 1
-
-#   if lux > mlux:
-#       mlux = lux
-#   if pir > mpir:
-#       mpir = pir
-#   if mat < mmat:
-#       mmat = mat
-#   if sound > msound:
-#       msound = sound
-#   if volume > mvolume:
-#       mvolume = volume
-
-    # mlux = var
-    # mpir = var
-    # mmat = var
-    # msound = var
-    # mvolume = var
-    # mom = var
-    # dad = var + 1
-    # var = var + 1
-    #send data to AWS
-    # if count == 0:
-    # msg = {'ts': ts, 'lux': mlux, 'pir': mpir, 'mat': mmat, 'sound': msound, 'volume': mvolume, 'mom': mom, 'dad': dad}
-    # print json.dumps(msg)
-    # client.publish('sensorTopic', json.dumps(msg))
-       # mlux = mpir = mmat = msound = mvolume = 0
-       #if mmat == 1:
-       #    nfcid = 0
-# thread = threading.Thread(target=reader)
-# thread.start()
-# end nfc setup
-
-# count = 0
-#mlux = mpir = mmat = msound = mvolume = 0
-
-# var = 1
-
-# while True:
-    # print "Thread2"
-    # time.sleep(3)
-    # read sensor data
-    # ts = int(time.time())
-#    lux = tsl.lux()
-#    pir = wpi.digitalRead(2)
-#    mat = wpi.digitalRead(3)
-#    sound = wpi.digitalRead(21)
-#    volume = wpi.analogRead(0)*255/2047 # 0-10=quiet, 10-30=moderate, 30-127=loud
-
-#    mom = 0
-#    dad = 0
-#    if mat == 0:
-#        if nfcid == 'F10B330F':
-#            mom = 1
-#        elif nfcid == '833BC4A2':
-#            dad = 1
-
-#    if lux > mlux:
-#        mlux = lux
-#    if pir > mpir:
-#        mpir = pir
-#    if mat < mmat:
-#        mmat = mat
-#    if sound > msound:
-#        msound = sound
-#    if volume > mvolume:
-#        mvolume = volume
-
-    # mlux = var
-    # mpir = var
-    # mmat = var
-    # msound = var
-    # mvolume = var
-    # mom = var
-    # dad = var + 1
-    # var = var + 1
-    # send data to AWS
-    # if count == 0:
-    # msg = {'ts': ts, 'lux': mlux, 'pir': mpir, 'mat': mmat, 'sound': msound, 'volume': mvolume, 'mom': mom, 'dad': dad}
-    # print json.dumps(msg)
-    # client.publish('sensorTopic', json.dumps(msg))
-#        mlux = mpir = mmat = msound = mvolume = 0
-#        if mmat == 1:
-#            nfcid = 0
-    # count = (count + 1) % 20
